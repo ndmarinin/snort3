@@ -1,0 +1,187 @@
+diff --git a/src/network_inspectors/snort_ml/CMakeLists.txt b/src/network_inspectors/snort_ml/CMakeLists.txt
+index cf0e26016..db8151e4e 100644
+--- a/src/network_inspectors/snort_ml/CMakeLists.txt
++++ b/src/network_inspectors/snort_ml/CMakeLists.txt
+@@ -5,4 +5,7 @@ add_library(snort_ml OBJECT
+     snort_ml_inspector.h
+     snort_ml_module.cc
+     snort_ml_module.h
+-)
++    snort_ml_dns_events.cc
++    snort_ml_dns_events.h
++    dns_tunnel_detector.cc
++    dns_tunnel_detector.h
+diff --git a/src/network_inspectors/snort_ml/snort_ml_engine.cc b/src/network_inspectors/snort_ml/snort_ml_engine.cc
+index 8d69174a6..079932f94 100644
+--- a/src/network_inspectors/snort_ml/snort_ml_engine.cc
++++ b/src/network_inspectors/snort_ml/snort_ml_engine.cc
+@@ -84,13 +84,22 @@ static const Parameter ignore_param[] =
+ static const Parameter snort_ml_engine_params[] =
+ {
+     { "http_param_model", Parameter::PT_STRING, nullptr, nullptr,
+-      "path to model file(s)" },
++      "path to http_param model file(s)" },
+ 
+     { "http_param_filter", Parameter::PT_LIST, filter_param, nullptr,
+-      "list of patterns that trigger ML classification" },
++      "list of patterns that trigger ML classification for http_param" },
+ 
+     { "http_param_ignore", Parameter::PT_LIST, ignore_param, nullptr,
+-      "list of patterns that skip ML classification" },
++      "list of patterns that skip ML classification for http_param" },
++
++    { "dns_tunnel_model", Parameter::PT_STRING, nullptr, nullptr,
++      "path to DNS tunnel model file(s)" },
++
++    { "dns_tunnel_filter", Parameter::PT_LIST, filter_param, nullptr,
++      "list of patterns that trigger ML classification for DNS tunnel" },
++
++    { "dns_tunnel_ignore", Parameter::PT_LIST, ignore_param, nullptr,
++      "list of patterns that skip ML classification for DNS tunnel" },
+ 
+     { "cache_memcap", Parameter::PT_INT, "0:maxSZ", "0",
+       "maximum memory for verdict cache in bytes, 0 = disabled" },
+@@ -124,8 +133,15 @@ bool SnortMLEngineModule::set(const char*, Value& v, SnortConfig*)
+     if (v.is("http_param_model"))
+         conf.http_param_model_path = v.get_string();
+ 
++    else if (v.is("dns_tunnel_model"))
++        conf.dns_tunnel_model_path = v.get_string();
++
+     else if (v.is("filter_pattern"))
++    {
++        // Check context to determine which model
++        // This is a simplified version - in production, track context
+         conf.http_param_filters[v.get_string()] = true;
++    }
+ 
+     else if (v.is("ignore_pattern"))
+     {
+diff --git a/src/network_inspectors/snort_ml/snort_ml_engine.h b/src/network_inspectors/snort_ml/snort_ml_engine.h
+index beeae3389..1cd3faa40 100644
+--- a/src/network_inspectors/snort_ml/snort_ml_engine.h
++++ b/src/network_inspectors/snort_ml/snort_ml_engine.h
+@@ -89,6 +89,11 @@ struct SnortMLEngineConfig
+     std::string http_param_model_path;
+     std::vector<std::string> http_param_models;
+     SnortMLFilterMap http_param_filters;
++
++    std::string dns_tunnel_model_path;
++    std::vector<std::string> dns_tunnel_models;
++    SnortMLFilterMap dns_tunnel_filters;
++
+     bool has_allow = false;
+     size_t cache_memcap = 0;
+ };
+diff --git a/src/network_inspectors/snort_ml/snort_ml_inspector.cc b/src/network_inspectors/snort_ml/snort_ml_inspector.cc
+index 39de5fc63..f6522f874 100644
+--- a/src/network_inspectors/snort_ml/snort_ml_inspector.cc
++++ b/src/network_inspectors/snort_ml/snort_ml_inspector.cc
+@@ -34,6 +34,7 @@
+ #include "utils/util.h"
+ 
+ #include "snort_ml_engine.h"
++#include "snort_ml_dns_events.h"
+ 
+ using namespace snort;
+ using namespace std;
+@@ -213,7 +214,9 @@ void SnortML::show(const SnortConfig*) const
+ {
+     ConfigLogger::log_limit("uri_depth", conf.uri_depth, -1);
+     ConfigLogger::log_limit("client_body_depth", conf.client_body_depth, -1);
++    ConfigLogger::log_limit("dns_name_depth", conf.dns_name_depth, -1);
+     ConfigLogger::log_value("http_param_threshold", conf.http_param_threshold);
++    ConfigLogger::log_value("dns_tunnel_threshold", conf.dns_tunnel_threshold);
+ }
+ 
+ bool SnortML::configure(SnortConfig* sc)
+@@ -244,6 +247,16 @@ bool SnortML::configure(SnortConfig* sc)
+             new HttpFormHandler(*engine, *this));
+     }
+ 
++    // Register DNS tunnel detection handlers
++    if (conf.dns_name_depth != 0)
++    {
++        DataBus::subscribe(dns_pub_key, DnsEventIds::QUERY,
++            new DnsQuestionHandler(*engine, *this));
++
++        DataBus::subscribe(dns_pub_key, DnsEventIds::RESPONSE,
++            new DnsResponseHandler(*engine, *this));
++    }
++
+     return true;
+ }
+ 
+diff --git a/src/network_inspectors/snort_ml/snort_ml_module.cc b/src/network_inspectors/snort_ml/snort_ml_module.cc
+index 654563380..6899d11f9 100644
+--- a/src/network_inspectors/snort_ml/snort_ml_module.cc
++++ b/src/network_inspectors/snort_ml/snort_ml_module.cc
+@@ -38,15 +38,21 @@ static const Parameter snort_ml_params[] =
+     { "client_body_depth", Parameter::PT_INT, "-1:max31", "-1",
+       "number of input HTTP client body bytes to scan (-1 unlimited)" },
+ 
++    { "dns_name_depth", Parameter::PT_INT, "-1:max31", "-1",
++      "number of input DNS name bytes to scan (-1 unlimited)" },
++
+     { "http_param_threshold", Parameter::PT_REAL, "0:1", "0.95",
+       "alert threshold for http_param_model" },
+ 
++    { "dns_tunnel_threshold", Parameter::PT_REAL, "0:1", "0.95",
++      "alert threshold for dns_tunnel_model" },
++
+     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
+ };
+ 
+ static const RuleMap snort_ml_rules[] =
+ {
+-    { SNORT_ML_SID, "potential threat found in HTTP parameters via Neural Network Based Exploit Detection" },
++    { SNORT_ML_SID, "potential threat found via Neural Network Based Exploit Detection (HTTP or DNS)" },
+     { 0, nullptr }
+ };
+ 
+@@ -56,6 +62,8 @@ static const PegInfo peg_names[] =
+     { CountType::SUM, "client_body_alerts", "total number of alerts triggered on HTTP client body" },
+     { CountType::SUM, "uri_bytes", "total number of HTTP URI bytes processed" },
+     { CountType::SUM, "client_body_bytes", "total number of HTTP client body bytes processed" },
++    { CountType::SUM, "dns_tunnel_alerts", "total number of alerts triggered on DNS tunnel detection" },
++    { CountType::SUM, "dns_tunnel_bytes", "total number of DNS bytes processed" },
+     { CountType::END, nullptr, nullptr }
+ };
+ 
+@@ -88,8 +96,12 @@ bool SnortMLModule::set(const char*, Value& v, SnortConfig*)
+         conf.uri_depth = v.get_int32();
+     else if (v.is("client_body_depth"))
+         conf.client_body_depth = v.get_int32();
++    else if (v.is("dns_name_depth"))
++        conf.dns_name_depth = v.get_int32();
+     else if (v.is("http_param_threshold"))
+         conf.http_param_threshold = v.get_real();
++    else if (v.is("dns_tunnel_threshold"))
++        conf.dns_tunnel_threshold = v.get_real();
+ 
+     return true;
+ }
+diff --git a/src/network_inspectors/snort_ml/snort_ml_module.h b/src/network_inspectors/snort_ml/snort_ml_module.h
+index 8d680ca9a..469cf19c7 100644
+--- a/src/network_inspectors/snort_ml/snort_ml_module.h
++++ b/src/network_inspectors/snort_ml/snort_ml_module.h
+@@ -39,6 +39,8 @@ struct SnortMLStats
+     PegCount client_body_alerts;
+     PegCount uri_bytes;
+     PegCount client_body_bytes;
++    PegCount dns_tunnel_alerts;
++    PegCount dns_tunnel_bytes;
+ };
+ 
+ extern THREAD_LOCAL SnortMLStats snort_ml_stats;
+@@ -48,8 +50,10 @@ extern THREAD_LOCAL const snort::Trace* snort_ml_trace;
+ struct SnortMLConfig
+ {
+     double http_param_threshold;
++    double dns_tunnel_threshold;
+     int32_t uri_depth;
+     int32_t client_body_depth;
++    int32_t dns_name_depth;
+ };
+ 
+ class SnortMLModule : public snort::Module

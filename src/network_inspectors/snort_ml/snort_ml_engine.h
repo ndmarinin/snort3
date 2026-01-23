@@ -89,6 +89,7 @@ struct SnortMLEngineConfig
     std::string http_param_model_path;
     std::vector<std::string> http_param_models;
     SnortMLFilterMap http_param_filters;
+
     bool has_allow = false;
     size_t cache_memcap = 0;
 };

@@ -84,13 +84,13 @@ static const Parameter ignore_param[] =
 static const Parameter snort_ml_engine_params[] =
 {
     { "http_param_model", Parameter::PT_STRING, nullptr, nullptr,
-      "path to model file(s)" },
+      "path to http_param model file(s)" },
 
     { "http_param_filter", Parameter::PT_LIST, filter_param, nullptr,
-      "list of patterns that trigger ML classification" },
+      "list of patterns that trigger ML classification for http_param" },
 
     { "http_param_ignore", Parameter::PT_LIST, ignore_param, nullptr,
-      "list of patterns that skip ML classification" },
+      "list of patterns that skip ML classification for http_param" },
 
     { "cache_memcap", Parameter::PT_INT, "0:maxSZ", "0",
       "maximum memory for verdict cache in bytes, 0 = disabled" },
@@ -125,7 +125,11 @@ bool SnortMLEngineModule::set(const char*, Value& v, SnortConfig*)
         conf.http_param_model_path = v.get_string();
 
     else if (v.is("filter_pattern"))
+    {
+        // Check context to determine which model
+        // This is a simplified version - in production, track context
         conf.http_param_filters[v.get_string()] = true;
+    }
 
     else if (v.is("ignore_pattern"))
     {

@@ -374,14 +374,6 @@ ACShowSnortPacketLatencyData::~ACShowSnortPacketLatencyData()
             double average_pkt_time = latency_data_proto.pkt_count > 0 ? 
             (latency_data_proto.sum_time*1.0 / latency_data_proto.pkt_count / 1000.0) : 0.0;
 
-            char max_pkt_src_ip[INET6_ADDRSTRLEN], max_pkt_dst_ip[INET6_ADDRSTRLEN];
-            char up_max_pkt_src_ip[INET6_ADDRSTRLEN], up_max_pkt_dst_ip[INET6_ADDRSTRLEN];
-
-            format_ip_addr(latency_data_proto.max_pkt_src_addr, latency_data_proto.max_pkt_src_ipv6, max_pkt_src_ip, sizeof(max_pkt_src_ip));
-            format_ip_addr(latency_data_proto.max_pkt_dst_addr, latency_data_proto.max_pkt_dst_ipv6, max_pkt_dst_ip, sizeof(max_pkt_dst_ip));
-            format_ip_addr(latency_data_proto.snort_up_max_pkt_src_addr, latency_data_proto.snort_up_max_pkt_src_ipv6, up_max_pkt_src_ip, sizeof(up_max_pkt_src_ip));
-            format_ip_addr(latency_data_proto.snort_up_max_pkt_dst_addr, latency_data_proto.snort_up_max_pkt_dst_ipv6, up_max_pkt_dst_ip, sizeof(up_max_pkt_dst_ip));
-
             LogRespond(ctrlcon, "  [%s]\n", protocol_names[i]);
             if (latency_data_proto.snort_up_max_pkt_time != 0)
                 LogRespond(ctrlcon, "    Max Latency (us, since restart): %lu\n", latency_data_proto.snort_up_max_pkt_time/1000);
@@ -395,26 +387,6 @@ ACShowSnortPacketLatencyData::~ACShowSnortPacketLatencyData()
                 LogRespond(ctrlcon, "    Average Packet Latency in last 5mins (us): %.3f\n", average_pkt_time);
             if (latency_data_proto.max_pkt_time != 0)
                 LogRespond(ctrlcon, "    Maximum Observed Latency in last 5mins (us): %lu\n", latency_data_proto.max_pkt_time/1000);
-
-            // Only print 5-tuple lines if any port is non-zero and if it has valid IPs
-            if ( (latency_data_proto.max_pkt_src_port != 0 || latency_data_proto.max_pkt_dst_port != 0)
-                && (strcmp(max_pkt_src_ip, invalid_ip) != 0)
-                && (strcmp(max_pkt_dst_ip, invalid_ip) != 0) )
-                LogRespond(ctrlcon, "    5min Max Latency Packet 5-tuple: %s:%u -> %s:%u (%s)\n",
-                    max_pkt_src_ip,
-                    latency_data_proto.max_pkt_src_port,
-                    max_pkt_dst_ip,
-                    latency_data_proto.max_pkt_dst_port,
-                    protocol_names[i]);
-            if ( (latency_data_proto.snort_up_max_pkt_src_port != 0 || latency_data_proto.snort_up_max_pkt_dst_port != 0)
-                && (strcmp(up_max_pkt_src_ip, invalid_ip) != 0)
-                && (strcmp(up_max_pkt_dst_ip, invalid_ip) != 0) )
-                LogRespond(ctrlcon, "    Max Latency Packet 5-tuple (us, since restart): %s:%u -> %s:%u (%s)\n",
-                    up_max_pkt_src_ip,
-                    latency_data_proto.snort_up_max_pkt_src_port,
-                    up_max_pkt_dst_ip,
-                    latency_data_proto.snort_up_max_pkt_dst_port,
-                    protocol_names[i]);
 
         }
         LogRespond(ctrlcon, "------------------------------------------------------------\n");

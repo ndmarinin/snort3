@@ -27,7 +27,6 @@
 #include "service_inspectors/http_inspect/http_field.h"
 
 using namespace snort;
-
 THREAD_LOCAL const Trace* snort_ml_trace = nullptr;
 
 static const Parameter snort_ml_params[] =
@@ -46,7 +45,7 @@ static const Parameter snort_ml_params[] =
 
 static const RuleMap snort_ml_rules[] =
 {
-    { SNORT_ML_SID, "potential threat found in HTTP parameters via Neural Network Based Exploit Detection" },
+    { SNORT_ML_SID, "potential threat found via Neural Network Based Exploit Detection (HTTP)" },
     { 0, nullptr }
 };
 

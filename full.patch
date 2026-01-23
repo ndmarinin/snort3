@@ -1,0 +1,204 @@
+diff --git a/src/main/analyzer_command.cc b/src/main/analyzer_command.cc
+index 3921ec5c6..785e415a1 100644
+--- a/src/main/analyzer_command.cc
++++ b/src/main/analyzer_command.cc
+@@ -374,14 +374,6 @@ ACShowSnortPacketLatencyData::~ACShowSnortPacketLatencyData()
+             double average_pkt_time = latency_data_proto.pkt_count > 0 ? 
+             (latency_data_proto.sum_time*1.0 / latency_data_proto.pkt_count / 1000.0) : 0.0;
+ 
+-            char max_pkt_src_ip[INET6_ADDRSTRLEN], max_pkt_dst_ip[INET6_ADDRSTRLEN];
+-            char up_max_pkt_src_ip[INET6_ADDRSTRLEN], up_max_pkt_dst_ip[INET6_ADDRSTRLEN];
+-
+-            format_ip_addr(latency_data_proto.max_pkt_src_addr, latency_data_proto.max_pkt_src_ipv6, max_pkt_src_ip, sizeof(max_pkt_src_ip));
+-            format_ip_addr(latency_data_proto.max_pkt_dst_addr, latency_data_proto.max_pkt_dst_ipv6, max_pkt_dst_ip, sizeof(max_pkt_dst_ip));
+-            format_ip_addr(latency_data_proto.snort_up_max_pkt_src_addr, latency_data_proto.snort_up_max_pkt_src_ipv6, up_max_pkt_src_ip, sizeof(up_max_pkt_src_ip));
+-            format_ip_addr(latency_data_proto.snort_up_max_pkt_dst_addr, latency_data_proto.snort_up_max_pkt_dst_ipv6, up_max_pkt_dst_ip, sizeof(up_max_pkt_dst_ip));
+-
+             LogRespond(ctrlcon, "  [%s]\n", protocol_names[i]);
+             if (latency_data_proto.snort_up_max_pkt_time != 0)
+                 LogRespond(ctrlcon, "    Max Latency (us, since restart): %lu\n", latency_data_proto.snort_up_max_pkt_time/1000);
+@@ -396,26 +388,6 @@ ACShowSnortPacketLatencyData::~ACShowSnortPacketLatencyData()
+             if (latency_data_proto.max_pkt_time != 0)
+                 LogRespond(ctrlcon, "    Maximum Observed Latency in last 5mins (us): %lu\n", latency_data_proto.max_pkt_time/1000);
+ 
+-            // Only print 5-tuple lines if any port is non-zero and if it has valid IPs
+-            if ( (latency_data_proto.max_pkt_src_port != 0 || latency_data_proto.max_pkt_dst_port != 0)
+-                && (strcmp(max_pkt_src_ip, invalid_ip) != 0)
+-                && (strcmp(max_pkt_dst_ip, invalid_ip) != 0) )
+-                LogRespond(ctrlcon, "    5min Max Latency Packet 5-tuple: %s:%u -> %s:%u (%s)\n",
+-                    max_pkt_src_ip,
+-                    latency_data_proto.max_pkt_src_port,
+-                    max_pkt_dst_ip,
+-                    latency_data_proto.max_pkt_dst_port,
+-                    protocol_names[i]);
+-            if ( (latency_data_proto.snort_up_max_pkt_src_port != 0 || latency_data_proto.snort_up_max_pkt_dst_port != 0)
+-                && (strcmp(up_max_pkt_src_ip, invalid_ip) != 0)
+-                && (strcmp(up_max_pkt_dst_ip, invalid_ip) != 0) )
+-                LogRespond(ctrlcon, "    Max Latency Packet 5-tuple (us, since restart): %s:%u -> %s:%u (%s)\n",
+-                    up_max_pkt_src_ip,
+-                    latency_data_proto.snort_up_max_pkt_src_port,
+-                    up_max_pkt_dst_ip,
+-                    latency_data_proto.snort_up_max_pkt_dst_port,
+-                    protocol_names[i]);
+-
+         }
+         LogRespond(ctrlcon, "------------------------------------------------------------\n");
+ 		instance++;
+diff --git a/src/network_inspectors/snort_ml/CMakeLists.txt b/src/network_inspectors/snort_ml/CMakeLists.txt
+index cf0e26016..9752b842b 100644
+--- a/src/network_inspectors/snort_ml/CMakeLists.txt
++++ b/src/network_inspectors/snort_ml/CMakeLists.txt
+@@ -5,4 +5,4 @@ add_library(snort_ml OBJECT
+     snort_ml_inspector.h
+     snort_ml_module.cc
+     snort_ml_module.h
+-)
++)
+\ No newline at end of file
+diff --git a/src/network_inspectors/snort_ml/snort_ml_engine.cc b/src/network_inspectors/snort_ml/snort_ml_engine.cc
+index 8d69174a6..2bebb5b54 100644
+--- a/src/network_inspectors/snort_ml/snort_ml_engine.cc
++++ b/src/network_inspectors/snort_ml/snort_ml_engine.cc
+@@ -84,13 +84,13 @@ static const Parameter ignore_param[] =
+ static const Parameter snort_ml_engine_params[] =
+ {
+     { "http_param_model", Parameter::PT_STRING, nullptr, nullptr,
+-      "path to model file(s)" },
++      "path to http_param model file(s)" },
+ 
+     { "http_param_filter", Parameter::PT_LIST, filter_param, nullptr,
+-      "list of patterns that trigger ML classification" },
++      "list of patterns that trigger ML classification for http_param" },
+ 
+     { "http_param_ignore", Parameter::PT_LIST, ignore_param, nullptr,
+-      "list of patterns that skip ML classification" },
++      "list of patterns that skip ML classification for http_param" },
+ 
+     { "cache_memcap", Parameter::PT_INT, "0:maxSZ", "0",
+       "maximum memory for verdict cache in bytes, 0 = disabled" },
+@@ -125,7 +125,11 @@ bool SnortMLEngineModule::set(const char*, Value& v, SnortConfig*)
+         conf.http_param_model_path = v.get_string();
+ 
+     else if (v.is("filter_pattern"))
++    {
++        // Check context to determine which model
++        // This is a simplified version - in production, track context
+         conf.http_param_filters[v.get_string()] = true;
++    }
+ 
+     else if (v.is("ignore_pattern"))
+     {
+diff --git a/src/network_inspectors/snort_ml/snort_ml_engine.h b/src/network_inspectors/snort_ml/snort_ml_engine.h
+index beeae3389..b8f91837c 100644
+--- a/src/network_inspectors/snort_ml/snort_ml_engine.h
++++ b/src/network_inspectors/snort_ml/snort_ml_engine.h
+@@ -89,6 +89,7 @@ struct SnortMLEngineConfig
+     std::string http_param_model_path;
+     std::vector<std::string> http_param_models;
+     SnortMLFilterMap http_param_filters;
++
+     bool has_allow = false;
+     size_t cache_memcap = 0;
+ };
+diff --git a/src/network_inspectors/snort_ml/snort_ml_inspector.cc b/src/network_inspectors/snort_ml/snort_ml_inspector.cc
+index 39de5fc63..05bec73ff 100644
+--- a/src/network_inspectors/snort_ml/snort_ml_inspector.cc
++++ b/src/network_inspectors/snort_ml/snort_ml_inspector.cc
+@@ -31,6 +31,7 @@
+ #include "pub_sub/http_events.h"
+ #include "pub_sub/http_form_data_event.h"
+ #include "pub_sub/http_request_body_event.h"
++#include "pub_sub/dns_events.h"
+ #include "utils/util.h"
+ 
+ #include "snort_ml_engine.h"
+@@ -87,10 +88,15 @@ void HttpUriHandler::handle(DataEvent& de, Flow*)
+     debug_logf(snort_ml_trace, TRACE_CLASSIFIER, nullptr,
+         "output: %f\n", static_cast<double>(output));
+ 
++    // Console output for ML classification results
++    printf("P0:snort_ml:classifier:1: input (query): %.*s\n", (int)len, query);
++    printf("P0:snort_ml:classifier:1: output: %.6f\n", static_cast<double>(output));
++
+     if ((double)output > conf.http_param_threshold)
+     {
+         snort_ml_stats.uri_alerts++;
+         debug_logf(snort_ml_trace, TRACE_CLASSIFIER, nullptr, "<ALERT>\n");
++        printf("P0:snort_ml:classifier:1: <ALERT>\n");
+         DetectionEngine::queue_event(SNORT_ML_GID, SNORT_ML_SID);
+     }
+ }
+@@ -244,6 +250,52 @@ bool SnortML::configure(SnortConfig* sc)
+             new HttpFormHandler(*engine, *this));
+     }
+ 
++    // DNS Response Handler for DNS tunnel detection
++    class DnsResponseHandler : public DataHandler
++    {
++    public:
++        DnsResponseHandler(const SnortMLEngine& eng, const SnortML& ins)
++            : DataHandler(SNORT_ML_NAME), engine(eng), inspector(ins) {}
++
++        void handle(DataEvent& de, Flow*) override
++        {
++            Profile profile(snort_ml_prof);
++
++            DnsResponseEvent* dre = reinterpret_cast<DnsResponseEvent*>(&de);
++            const std::string& query = dre->get_query();
++
++            if (query.empty())
++                return;
++
++            const SnortMLConfig& conf = inspector.get_config();
++            const size_t len = std::min((size_t)conf.uri_depth, query.length());
++
++            float output = 0;
++            if (!engine.scan(query.c_str(), len, output))
++                return;
++
++            snort_ml_stats.uri_bytes += len;
++
++            printf("P0:snort_ml:dns_classifier:1: input (domain): %.*s\n", (int)len, query.c_str());
++            printf("P0:snort_ml:dns_classifier:1: output: %.6f\n", static_cast<double>(output));
++
++            if ((double)output > conf.http_param_threshold)
++            {
++                snort_ml_stats.uri_alerts++;
++                printf("P0:snort_ml:dns_classifier:1: <ALERT>\n");
++                DetectionEngine::queue_event(SNORT_ML_GID, SNORT_ML_SID);
++            }
++        }
++
++    private:
++        const SnortMLEngine& engine;
++        const SnortML& inspector;
++    };
++
++    // Subscribe to DNS response events
++    DataBus::subscribe(dns_pub_key, DnsEventIds::DNS_RESPONSE,
++        new DnsResponseHandler(*engine, *this));
++
+     return true;
+ }
+ 
+diff --git a/src/network_inspectors/snort_ml/snort_ml_module.cc b/src/network_inspectors/snort_ml/snort_ml_module.cc
+index 654563380..f1ba2e057 100644
+--- a/src/network_inspectors/snort_ml/snort_ml_module.cc
++++ b/src/network_inspectors/snort_ml/snort_ml_module.cc
+@@ -27,7 +27,6 @@
+ #include "service_inspectors/http_inspect/http_field.h"
+ 
+ using namespace snort;
+-
+ THREAD_LOCAL const Trace* snort_ml_trace = nullptr;
+ 
+ static const Parameter snort_ml_params[] =
+@@ -46,7 +45,7 @@ static const Parameter snort_ml_params[] =
+ 
+ static const RuleMap snort_ml_rules[] =
+ {
+-    { SNORT_ML_SID, "potential threat found in HTTP parameters via Neural Network Based Exploit Detection" },
++    { SNORT_ML_SID, "potential threat found via Neural Network Based Exploit Detection (HTTP)" },
+     { 0, nullptr }
+ };
+ 

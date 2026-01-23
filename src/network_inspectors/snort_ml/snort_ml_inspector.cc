@@ -31,6 +31,7 @@
 #include "pub_sub/http_events.h"
 #include "pub_sub/http_form_data_event.h"
 #include "pub_sub/http_request_body_event.h"
+#include "pub_sub/dns_events.h"
 #include "utils/util.h"
 
 #include "snort_ml_engine.h"
@@ -87,10 +88,15 @@ void HttpUriHandler::handle(DataEvent& de, Flow*)
     debug_logf(snort_ml_trace, TRACE_CLASSIFIER, nullptr,
         "output: %f\n", static_cast<double>(output));
 
+    // Console output for ML classification results
+    printf("P0:snort_ml:classifier:1: input (query): %.*s\n", (int)len, query);
+    printf("P0:snort_ml:classifier:1: output: %.6f\n", static_cast<double>(output));
+
     if ((double)output > conf.http_param_threshold)
     {
         snort_ml_stats.uri_alerts++;
         debug_logf(snort_ml_trace, TRACE_CLASSIFIER, nullptr, "<ALERT>\n");
+        printf("P0:snort_ml:classifier:1: <ALERT>\n");
         DetectionEngine::queue_event(SNORT_ML_GID, SNORT_ML_SID);
     }
 }
@@ -243,6 +249,52 @@ bool SnortML::configure(SnortConfig* sc)
         DataBus::subscribe(http_pub_key, HttpEventIds::MIME_FORM_DATA,
             new HttpFormHandler(*engine, *this));
     }
+
+    // DNS Response Handler for DNS tunnel detection
+    class DnsResponseHandler : public DataHandler
+    {
+    public:
+        DnsResponseHandler(const SnortMLEngine& eng, const SnortML& ins)
+            : DataHandler(SNORT_ML_NAME), engine(eng), inspector(ins) {}
+
+        void handle(DataEvent& de, Flow*) override
+        {
+            Profile profile(snort_ml_prof);
+
+            DnsResponseEvent* dre = reinterpret_cast<DnsResponseEvent*>(&de);
+            const std::string& query = dre->get_query();
+
+            if (query.empty())
+                return;
+
+            const SnortMLConfig& conf = inspector.get_config();
+            const size_t len = std::min((size_t)conf.uri_depth, query.length());
+
+            float output = 0;
+            if (!engine.scan(query.c_str(), len, output))
+                return;
+
+            snort_ml_stats.uri_bytes += len;
+
+            //printf("P0:snort_ml:dns_classifier:1: input (domain): %.*s\n", (int)len, query.c_str());
+            //printf("P0:snort_ml:dns_classifier:1: output: %.6f\n", static_cast<double>(output));
+
+            if ((double)output > conf.http_param_threshold)
+            {
+                snort_ml_stats.uri_alerts++;
+                //printf("P0:snort_ml:dns_classifier:1: <ALERT>\n");
+                DetectionEngine::queue_event(SNORT_ML_GID, SNORT_ML_SID);
+            }
+        }
+
+    private:
+        const SnortMLEngine& engine;
+        const SnortML& inspector;
+    };
+
+    // Subscribe to DNS response events
+    DataBus::subscribe(dns_pub_key, DnsEventIds::DNS_RESPONSE,
+        new DnsResponseHandler(*engine, *this));
 
     return true;
 }
