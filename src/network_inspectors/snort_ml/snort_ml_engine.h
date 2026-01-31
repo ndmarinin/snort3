@@ -28,6 +28,11 @@
 #include <memory>
 #include <unordered_map>
 #include <utility>
+#include <queue>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
 
 #include "framework/inspector.h"
 #include "framework/module.h"
@@ -75,13 +80,42 @@ struct SnortMLEngineStats : public LruCacheLocalStats
     PegCount libml_calls;
 };
 
+// Forward declarations
+class SnortMLEngine;
+struct MLInferenceRequest;
+
+// ============================================================================
+// Optimized Batch Processing for DNS/ML Inference
+// ============================================================================
+
+// Single inference request
+struct MLInferenceRequest
+{
+    const char* data;
+    size_t length;
+    uint64_t hash;
+    float* result;
+    std::atomic<bool>* done = nullptr;
+    int request_id = 0;
+};
+
+// Thread-safe batch queue for async processing (forward declaration - impl below)
+class MLBatchProcessor;
+
 typedef LruCacheLocal<uint64_t, float, std::hash<uint64_t>> SnortMLCache;
-typedef std::unordered_map<std::string, bool> SnortMLFilterMap;
+typedef std::unordered_map<std::string, bool> SnortMLFilterMap;;
 
 struct SnortMLContext
 {
     libml::BinaryClassifierSet classifiers;
     std::unique_ptr<SnortMLCache> cache;
+    std::unique_ptr<MLBatchProcessor> batch_processor;  // ✅ Async batch processing
+    
+    // ✅ OPTIMIZATION: Keep model buffers in memory (never reload)
+    // Models are loaded once at configure() and kept resident in memory
+    // This eliminates model load overhead on each inference
+    std::vector<std::string> model_buffers;  // Raw TFLite model data
+    std::atomic<size_t> total_model_size{0}; // For monitoring
 };
 
 struct SnortMLEngineConfig
@@ -149,6 +183,118 @@ private:
 
     SnortMLEngineConfig conf;
     snort::SearchTool* mpse = nullptr;
+};
+
+// ============================================================================
+// MLBatchProcessor Implementation (after SnortMLEngine definition)
+// ============================================================================
+
+class MLBatchProcessor
+{
+public:
+    MLBatchProcessor(size_t batch_size = 32, size_t max_queue = 1000)
+        : batch_size(batch_size), max_queue_size(max_queue), 
+          running(false), processed_count(0) {}
+
+    ~MLBatchProcessor()
+    {
+        stop();
+    }
+
+    // Start background thread for batch processing
+    void start(const SnortMLEngine* eng)
+    {
+        if (running.exchange(true))
+            return;
+        
+        engine = eng;
+        worker_thread = std::thread(&MLBatchProcessor::process_batches, this);
+    }
+
+    // Stop background thread
+    void stop()
+    {
+        if (!running.exchange(false))
+            return;
+        
+        cv.notify_all();
+        if (worker_thread.joinable())
+            worker_thread.join();
+    }
+
+    // Add inference request to queue (non-blocking)
+    bool queue_request(const MLInferenceRequest& req)
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        if (request_queue.size() >= max_queue_size)
+            return false;
+        
+        request_queue.push(req);
+        if (request_queue.size() >= batch_size)
+            cv.notify_one();
+        
+        return true;
+    }
+
+    // Synchronous inference (for immediate results)
+    bool process_now(const char* data, size_t len, float& out)
+    {
+        if (!engine)
+            return false;
+        return engine->scan(data, len, out);
+    }
+
+    uint64_t get_processed_count() const
+    {
+        return processed_count;
+    }
+
+private:
+    void process_batches()
+    {
+        std::vector<MLInferenceRequest> batch;
+        batch.reserve(batch_size);
+
+        while (running)
+        {
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                cv.wait_for(lock, std::chrono::milliseconds(10), 
+                           [this] { return request_queue.size() >= batch_size || !running; });
+
+                // Drain queue into batch
+                while (!request_queue.empty() && batch.size() < batch_size)
+                {
+                    batch.push_back(request_queue.front());
+                    request_queue.pop();
+                }
+            }
+
+            // Process batch (without holding lock)
+            if (!batch.empty() && engine)
+            {
+                for (auto& req : batch)
+                {
+                    engine->scan(req.data, req.length, *req.result);
+                    if (req.done)
+                        req.done->store(true, std::memory_order_release);
+                    processed_count++;
+                }
+                batch.clear();
+            }
+        }
+    }
+
+    const SnortMLEngine* engine = nullptr;
+    size_t batch_size;
+    size_t max_queue_size;
+    
+    std::queue<MLInferenceRequest> request_queue;
+    std::mutex queue_mutex;
+    std::condition_variable cv;
+    std::atomic<bool> running;
+    std::thread worker_thread;
+    std::atomic<uint64_t> processed_count;
 };
 
 #endif

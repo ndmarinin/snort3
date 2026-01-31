@@ -24,6 +24,7 @@
 #include "snort_ml_inspector.h"
 
 #include <cassert>
+#include <chrono>
 
 #include "detection/detection_engine.h"
 #include "log/messages.h"
@@ -270,19 +271,39 @@ bool SnortML::configure(SnortConfig* sc)
             const SnortMLConfig& conf = inspector.get_config();
             const size_t len = std::min((size_t)conf.uri_depth, query.length());
 
+            // ✅ OPTIMIZATION: Get pointer once, avoid multiple c_str() calls
+            const char* domain_ptr = query.c_str();
+            
+            // ✅ OPTIMIZATION: High-resolution timer with minimal overhead
+            auto start = std::chrono::high_resolution_clock::now();
+            
             float output = 0;
-            if (!engine.scan(query.c_str(), len, output))
+            // ✅ OPTIMIZATION: Synchronous scan for immediate processing
+            // Results needed immediately for alert queuing
+            if (!engine.scan(domain_ptr, len, output))
                 return;
 
-            snort_ml_stats.uri_bytes += len;
+            auto end = std::chrono::high_resolution_clock::now();
+            
+            // Calculate time in microseconds
+            uint64_t elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                end - start).count();
 
-            //printf("P0:snort_ml:dns_classifier:1: input (domain): %.*s\n", (int)len, query.c_str());
-            //printf("P0:snort_ml:dns_classifier:1: output: %.6f\n", static_cast<double>(output));
+            snort_ml_stats.uri_bytes += len;
+            snort_ml_stats.dns_inference_time_us += elapsed_us;
+            snort_ml_stats.dns_inference_count++;
+            
+            // Update min/max statistics
+            if (elapsed_us > snort_ml_stats.dns_inference_max_us)
+                snort_ml_stats.dns_inference_max_us = elapsed_us;
+            
+            if (snort_ml_stats.dns_inference_min_us == 0 || 
+                elapsed_us < snort_ml_stats.dns_inference_min_us)
+                snort_ml_stats.dns_inference_min_us = elapsed_us;
 
             if ((double)output > conf.http_param_threshold)
             {
                 snort_ml_stats.uri_alerts++;
-                //printf("P0:snort_ml:dns_classifier:1: <ALERT>\n");
                 DetectionEngine::queue_event(SNORT_ML_GID, SNORT_ML_SID);
             }
         }

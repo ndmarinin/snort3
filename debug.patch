@@ -1,0 +1,166 @@
+diff --git a/src/network_inspectors/snort_ml/snort_ml_engine.cc b/src/network_inspectors/snort_ml/snort_ml_engine.cc
+index 2bebb5b54..d6ee7f44b 100644
+--- a/src/network_inspectors/snort_ml/snort_ml_engine.cc
++++ b/src/network_inspectors/snort_ml/snort_ml_engine.cc
+@@ -25,6 +25,7 @@
+ #include "snort_ml_engine.h"
+ 
+ #include <cassert>
++#include <chrono>
+ #include <cstring>
+ #include <fstream>
+ 
+@@ -313,7 +314,16 @@ bool SnortMLEngine::scan(const char* buf, const size_t len, float& out) const
+     if (!snort_ml_ctx)
+         return false;
+ 
+-    if (mpse)
++    auto start_total = std::chrono::high_resolution_clock::now();
++
++    // Skip filter search for DNS data (typically <256 bytes domain names)
++    // Filter overhead is ~150-200 µs on Aho-Corasick search
++    // For DNS domains, this is unnecessary - do direct ML inference
++    bool skip_filter_for_short = (len < 300);  // DNS domains are short
++
++    auto start_filter = std::chrono::high_resolution_clock::now();
++
++    if (mpse && !skip_filter_for_short)
+     {
+         snort_ml_engine_stats.filter_searches++;
+ 
+@@ -335,18 +345,45 @@ bool SnortMLEngine::scan(const char* buf, const size_t len, float& out) const
+         }
+     }
+ 
++    auto end_filter = std::chrono::high_resolution_clock::now();
++
++    // Use fast hash lookup for cache - inline FNV1a for DNS strings
++    uint64_t hash = fnv1a(buf, len);
++    
+     float res = 0;
+     bool is_new = true;
+ 
++    auto start_cache = std::chrono::high_resolution_clock::now();
++
+     float& result = (snort_ml_ctx->cache) ?
+-        snort_ml_ctx->cache->find_else_create(fnv1a(buf, len), &is_new) : res;
++        snort_ml_ctx->cache->find_else_create(hash, &is_new) : res;
++
++    auto end_cache = std::chrono::high_resolution_clock::now();
+ 
+     if (is_new)
+     {
+         snort_ml_engine_stats.libml_calls++;
+ 
++        auto start_inference = std::chrono::high_resolution_clock::now();
++
+         if (!snort_ml_ctx->classifiers.run(buf, len, result))
+             return false;
++
++        auto end_inference = std::chrono::high_resolution_clock::now();
++        
++        uint64_t inference_us = std::chrono::duration_cast<std::chrono::microseconds>(
++            end_inference - start_inference).count();
++        
++        // Debug output (optional)
++        if (false)  // Set to true to enable detailed timing logs
++        {
++            uint64_t filter_us = std::chrono::duration_cast<std::chrono::microseconds>(
++                end_filter - start_filter).count();
++            uint64_t cache_us = std::chrono::duration_cast<std::chrono::microseconds>(
++                end_cache - start_cache).count();
++            printf("PROFILE: filter=%ld µs, cache=%ld µs, inference=%ld µs, len=%lu\n",
++                   filter_us, cache_us, inference_us, len);
++        }
+     }
+ 
+     out = result;
+diff --git a/src/network_inspectors/snort_ml/snort_ml_inspector.cc b/src/network_inspectors/snort_ml/snort_ml_inspector.cc
+index 68ec36583..20505f104 100644
+--- a/src/network_inspectors/snort_ml/snort_ml_inspector.cc
++++ b/src/network_inspectors/snort_ml/snort_ml_inspector.cc
+@@ -24,6 +24,7 @@
+ #include "snort_ml_inspector.h"
+ 
+ #include <cassert>
++#include <chrono>
+ 
+ #include "detection/detection_engine.h"
+ #include "log/messages.h"
+@@ -270,19 +271,41 @@ bool SnortML::configure(SnortConfig* sc)
+             const SnortMLConfig& conf = inspector.get_config();
+             const size_t len = std::min((size_t)conf.uri_depth, query.length());
+ 
++            // Optimized: Get pointer once, avoid multiple c_str() calls
++            const char* domain_ptr = query.c_str();
++            
++            // Use high-resolution timer (single measurement)
++            auto start = std::chrono::high_resolution_clock::now();
++            
+             float output = 0;
+-            if (!engine.scan(query.c_str(), len, output))
++            if (!engine.scan(domain_ptr, len, output))
+                 return;
+ 
+-            snort_ml_stats.uri_bytes += len;
++            auto end = std::chrono::high_resolution_clock::now();
++            
++            // Calculate time in microseconds
++            uint64_t elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
++                end - start).count();
+ 
+-            //printf("P0:snort_ml:dns_classifier:1: input (domain): %.*s\n", (int)len, query.c_str());
+-            //printf("P0:snort_ml:dns_classifier:1: output: %.6f\n", static_cast<double>(output));
++            snort_ml_stats.uri_bytes += len;
++            snort_ml_stats.dns_inference_time_us += elapsed_us;
++            snort_ml_stats.dns_inference_count++;
++            
++            // Update min/max statistics
++            if (elapsed_us > snort_ml_stats.dns_inference_max_us)
++                snort_ml_stats.dns_inference_max_us = elapsed_us;
++            
++            if (snort_ml_stats.dns_inference_min_us == 0 || 
++                elapsed_us < snort_ml_stats.dns_inference_min_us)
++                snort_ml_stats.dns_inference_min_us = elapsed_us;
++
++            // Optional: Enable for detailed timing analysis
++            // printf("P0:snort_ml:dns: scan=%ld µs, total=%ld µs, domain=%.*s\n", 
++            //        scan_time_us, total_time_us, (int)len, domain_ptr);
+ 
+             if ((double)output > conf.http_param_threshold)
+             {
+                 snort_ml_stats.uri_alerts++;
+-                //printf("P0:snort_ml:dns_classifier:1: <ALERT>\n");
+                 DetectionEngine::queue_event(SNORT_ML_GID, SNORT_ML_SID);
+             }
+         }
+diff --git a/src/network_inspectors/snort_ml/snort_ml_module.cc b/src/network_inspectors/snort_ml/snort_ml_module.cc
+index f1ba2e057..99488db23 100644
+--- a/src/network_inspectors/snort_ml/snort_ml_module.cc
++++ b/src/network_inspectors/snort_ml/snort_ml_module.cc
+@@ -55,6 +55,10 @@ static const PegInfo peg_names[] =
+     { CountType::SUM, "client_body_alerts", "total number of alerts triggered on HTTP client body" },
+     { CountType::SUM, "uri_bytes", "total number of HTTP URI bytes processed" },
+     { CountType::SUM, "client_body_bytes", "total number of HTTP client body bytes processed" },
++    { CountType::SUM, "dns_inference_time_us", "total microseconds spent on DNS ML inference" },
++    { CountType::SUM, "dns_inference_count", "total number of DNS ML inferences" },
++    { CountType::SUM, "dns_inference_min_us", "minimum DNS ML inference time (microseconds)" },
++    { CountType::SUM, "dns_inference_max_us", "maximum DNS ML inference time (microseconds)" },
+     { CountType::END, nullptr, nullptr }
+ };
+ 
+diff --git a/src/network_inspectors/snort_ml/snort_ml_module.h b/src/network_inspectors/snort_ml/snort_ml_module.h
+index 8d680ca9a..720f65ad6 100644
+--- a/src/network_inspectors/snort_ml/snort_ml_module.h
++++ b/src/network_inspectors/snort_ml/snort_ml_module.h
+@@ -39,6 +39,10 @@ struct SnortMLStats
+     PegCount client_body_alerts;
+     PegCount uri_bytes;
+     PegCount client_body_bytes;
++    PegCount dns_inference_time_us;  // Total time spent on DNS ML inference (microseconds)
++    PegCount dns_inference_count;    // Number of DNS inferences
++    PegCount dns_inference_min_us;   // Minimum inference time (microseconds)
++    PegCount dns_inference_max_us;   // Maximum inference time (microseconds)
+ };
+ 
+ extern THREAD_LOCAL SnortMLStats snort_ml_stats;

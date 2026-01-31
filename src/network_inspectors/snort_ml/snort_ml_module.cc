@@ -55,6 +55,10 @@ static const PegInfo peg_names[] =
     { CountType::SUM, "client_body_alerts", "total number of alerts triggered on HTTP client body" },
     { CountType::SUM, "uri_bytes", "total number of HTTP URI bytes processed" },
     { CountType::SUM, "client_body_bytes", "total number of HTTP client body bytes processed" },
+    { CountType::SUM, "dns_inference_time_us", "total microseconds spent on DNS ML inference" },
+    { CountType::SUM, "dns_inference_count", "total number of DNS ML inferences" },
+    { CountType::SUM, "dns_inference_min_us", "minimum DNS ML inference time (microseconds)" },
+    { CountType::SUM, "dns_inference_max_us", "maximum DNS ML inference time (microseconds)" },
     { CountType::END, nullptr, nullptr }
 };
 

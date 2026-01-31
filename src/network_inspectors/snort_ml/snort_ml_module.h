@@ -39,6 +39,10 @@ struct SnortMLStats
     PegCount client_body_alerts;
     PegCount uri_bytes;
     PegCount client_body_bytes;
+    PegCount dns_inference_time_us;  // Total time spent on DNS ML inference (microseconds)
+    PegCount dns_inference_count;    // Number of DNS inferences
+    PegCount dns_inference_min_us;   // Minimum inference time (microseconds)
+    PegCount dns_inference_max_us;   // Maximum inference time (microseconds)
 };
 
 extern THREAD_LOCAL SnortMLStats snort_ml_stats;
